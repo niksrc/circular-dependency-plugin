@@ -1,11 +1,10 @@
 let path = require('path')
-let extend = require('util')._extend
 let BASE_ERROR = 'Circular dependency detected:\r\n'
 let PluginTitle = 'CircularDependencyPlugin'
 
 class CircularDependencyPlugin {
   constructor(options) {
-    this.options = extend({
+    this.options = Object.assign({
       exclude: new RegExp('$^'),
       include: new RegExp('.*'),
       failOnError: false,
@@ -16,55 +15,70 @@ class CircularDependencyPlugin {
   }
 
   apply(compiler) {
+    // Check if ModuleConcatenationPlugin is enabled
+    const moduleConcatenated = compiler.options.optimization.concatenateModules ||
+    compiler.options.plugins.some(plugin => plugin.constructor.name === 'ModuleConcatenationPlugin')
+
+    if (moduleConcatenated) {
+      compiler.hooks.compilation.tap(PluginTitle, (compilation) => {
+        compilation.hooks.optimizeModules.tap(PluginTitle, (modules) => {
+          this.hookHandler(compilation, modules)
+        })
+      })
+      return
+    }
+    compiler.hooks.done.tap(PluginTitle, ({ compilation }) => {
+      this.hookHandler(compilation, compilation.modules)
+    })
+  }
+
+  hookHandler(compilation, modules) {
     let plugin = this
     let cwd = this.options.cwd
 
-    compiler.hooks.compilation.tap(PluginTitle, (compilation) => {
-      compilation.hooks.optimizeModules.tap(PluginTitle, (modules) => {
-        if (plugin.options.onStart) {
-          plugin.options.onStart({ compilation });
-        }
-        for (let module of modules) {
-          const shouldSkip = (
-            module.resource == null ||
-            plugin.options.exclude.test(module.resource) ||
-            !plugin.options.include.test(module.resource)
-          )
-          // skip the module if it matches the exclude pattern
-          if (shouldSkip) {
-            continue
-          }
+    if (plugin.options.onStart) {
+      plugin.options.onStart({ compilation });
+    }
 
-          let maybeCyclicalPathsList = this.isCyclic(module, module, {}, compilation)
-          if (maybeCyclicalPathsList) {
-            // allow consumers to override all behavior with onDetected
-            if (plugin.options.onDetected) {
-              try {
-                plugin.options.onDetected({
-                  module: module,
-                  paths: maybeCyclicalPathsList,
-                  compilation: compilation
-                })
-              } catch(err) {
-                compilation.errors.push(err)
-              }
-              continue
-            }
+    for (let module of modules) {
+      const shouldSkip = (
+        module.resource == null ||
+        plugin.options.exclude.test(module.resource) ||
+        !plugin.options.include.test(module.resource)
+      )
+      // skip the module if it matches the exclude pattern
+      if (shouldSkip) {
+        continue
+      }
 
-            // mark warnings or errors on webpack compilation
-            let error = new Error(BASE_ERROR.concat(maybeCyclicalPathsList.join(' -> ')))
-            if (plugin.options.failOnError) {
-              compilation.errors.push(error)
-            } else {
-              compilation.warnings.push(error)
-            }
+      let maybeCyclicalPathsList = this.isCyclic(module, module, {}, compilation)
+      if (maybeCyclicalPathsList) {
+        // allow consumers to override all behavior with onDetected
+        if (plugin.options.onDetected) {
+          try {
+            plugin.options.onDetected({
+              module: module,
+              paths: maybeCyclicalPathsList,
+              compilation: compilation
+            })
+          } catch(err) {
+            compilation.errors.push(err)
           }
+          continue
         }
-        if (plugin.options.onEnd) {
-          plugin.options.onEnd({ compilation });
+
+        // mark warnings or errors on webpack compilation
+        let error = new Error(BASE_ERROR.concat(maybeCyclicalPathsList.join(' -> ')))
+        if (plugin.options.failOnError) {
+          compilation.errors.push(error)
+        } else {
+          compilation.warnings.push(error)
         }
-      })
-    })
+      }
+    }
+    if (plugin.options.onEnd) {
+      plugin.options.onEnd({ compilation });
+    }
   }
 
   isCyclic(initialModule, currentModule, seenModules, compilation) {
